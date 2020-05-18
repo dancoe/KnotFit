@@ -20,16 +20,19 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 def main():
-    indir = 'whl0137'
+    print("Let's begin...")
+    indir = '/home/brian/Documents/JHU/lensing/whl0137'
     imfile = 'hlsp_relics_hst_wfc3ir-60mas_whl0137-08_f110w_drz.fits'
     imfile = os.path.join(indir,imfile)
-    modeldir = 'whl0137/testruns/z6twopt'
+    modeldir = '/home/brian/Documents/JHU/lensing/whl0137/testruns/z6twopt'
     dflx = os.path.join(modeldir, 'dx_z6.fits')
     dfly = os.path.join(modeldir, 'dy_z6.fits')
 
+    print('Reading and reprojecting')
     ax, ay, imdataHST = initDeflection_Image(imfile, dflx, dfly, 
                                              zlens=0.566, zsource_in=6.0, zsource_out=6.2)
     
+    print('Making Magnification Map')
     magnifinv = makeMagnificationMap(ax, ay)
     
     # Define coordinate grid
@@ -43,18 +46,24 @@ def main():
     
     imstamp = imdataHST[ylo:yhi, xlo:xhi]
     
+    print('Generating Convolution Kernel')
     star = starGen(imdataHST, starLoc=(2232, 1622))
     
-    #knotpos = (2950, 1976) # lower knot
-    knotpos = (2981, 2006) # upper knot
-    
+    knotpos = (2950, 1976) # lower knot
+    #knotpos = (2981, 2006) # upper knot
+    x, y = knotpos
+    print(x)
+    print(y)
+
     rmsfile = 'hlsp_relics_hst_wfc3ir-60mas_whl0137-08_f110w_rms.fits'
     rmsfile = os.path.join(indir, rmsfile)
+    print('Generating ArgDict')
     argdict = initArgDict(rmsfile, imstamp, limits=(xlo,xhi,ylo,yhi), ax=ax, ay=ay,
                           knotpos=knotpos, sourcegrid=(xss,yss), star=star)
     
-    theta = np.array([.001, pc_to_pix(450, 6.2)])
-    sampler = runMCMC(theta, argdict, niter=5000, outfile='topknot_5k_4walk.h5')
+    theta = np.array([.001, 450, x, y])
+    print('Beginning MCMC')
+    sampler = runMCMC(theta, argdict, nwalkers=8, niter=2500, outfile='lowknot_pos_2500_8walk.h5')
     
     return sampler
 
@@ -155,8 +164,8 @@ def initArgDict(rmsfile, imstamp, limits, ax, ay,
                 knotpos, sourcegrid, star, delta=5):
     xlo, xhi, ylo, yhi = limits
     x, y = knotpos
-    xs = x - ax[y, x]
-    ys = y - ay[y, x]
+    #xs = x - ax[y, x]
+    #ys = y - ay[y, x]
     xss, yss = sourcegrid
     rmsfo = fits.open(rmsfile)
     rms = rmsfo[0].data
@@ -168,8 +177,10 @@ def initArgDict(rmsfile, imstamp, limits, ax, ay,
     knotbounds = [datax-delta, datax+delta, datay-delta,datay+delta]
     # Include in args: xs, ys, xss, yss, star, data, sigma=RMS
     argdict = {
-        "xs" : xs,
-        "ys" : ys,
+        #"xs" : xs,
+        #"ys" : ys,
+        "ax" : ax,
+        "ay" : ay,
         "xss" : xss,
         "yss" : yss,
         "star" : star,
@@ -187,24 +198,27 @@ def runMCMC(theta_init, argdict, nwalkers=4, niter=500, outfile=None, **kwargs):
     if outfile:
         backend = emcee.backends.HDFBackend(outfile)
         backend.reset(nwalkers,ndim)
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, prob, kwargs=argdict, backend=backend)
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, log_probability, kwargs=argdict, backend=backend)
     else:
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, prob, kwargs=argdict)
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, log_probability, kwargs=argdict)
     
     sampler.run_mcmc(pos, niter, progress=True)
     return sampler
 
 
-def prob(theta, **kwargs):
-    pri = prior(theta)
+def log_probability(theta, **kwargs):
+    pri = log_prior(theta)
     if not np.isfinite(pri):
         return -np.inf
     return pri + log_likelihood(theta,**kwargs)
     
 
-def prior(theta):
-    amp, reff = theta
-    if 0 < amp < 10 and 0 < reff < 50:
+def log_prior(theta):
+    amp, reff, xs, ys = theta
+    a, b = xs - 5, xs + 5
+    c, d = ys - 5, ys + 5
+    # Don't forget to change reff limits when changing from pixel to physical constraints
+    if 0 < amp < 10 and 0 < reff < 1050 and a < xs < b and c < ys < d:
         return 0
     return -np.inf
     
@@ -237,10 +251,10 @@ def chisquared(theta, **kwargs):
 
 
 def convolved(theta, **kwargs): 
-    amp, reff = theta
-    #amp, reff = preconv(theta)
-    #print(amp,reff)
-    xs, ys = kwargs["xs"], kwargs["ys"]
+    #amp, reff = theta #BDW
+    amp, reff, xs, ys = preconv(theta, **kwargs)
+    #print(amp,reff, xs, ys)
+    #BDW#xs, ys = kwargs["xs"], kwargs["ys"]
     xss, yss = kwargs["xss"], kwargs["yss"]
     star = kwargs["star"]
     sersic = Sersic2D(amplitude=amp, r_eff=reff, n=4, x_0=xs, y_0=ys)
@@ -252,17 +266,26 @@ def convolved(theta, **kwargs):
     return S1conv
 
 
-def preconv(theta):
+def preconv(theta, **kwargs):
     #This needs to be fixed...
-    flux, rpc = theta
+    flux, rpc, xim, yim = theta
+    xim = int(round(xim))
+    yim = int(round(yim))
+    #print(xim, type(xim))
+    #print(yim, type(yim))
+    ay = kwargs["ay"]
+    ax = kwargs["ax"]
+    xs = xim - ax[yim, xim]
+    ys = yim - ay[yim, xim] 
     rpix = pc_to_pix(rpc, 6.2)
-    dist = cosmo.angular_diameter_distance_z1z2(0 , 6.2).value * 10**6 #returns in pc
-    print(dist)
-    magnif = 300 #??
-    coef = (22.665 * magnif) / (4 * np.pi * dist**2)
-    print(coef)
-    amp = flux / (coef * rpc**2)
-    return amp, rpix
+    #dist = cosmo.angular_diameter_distance_z1z2(0 , 6.2).value * 10**6 #returns in pc
+    #print(dist)
+    #magnif = 300 #??
+    #coef = (22.665 * magnif) / (4 * np.pi * dist**2)
+    #print(coef)
+    #amp = flux / (coef * rpc**2)
+    amp = flux # stand-in until you fix this calculation...
+    return amp, rpix, xs, ys
 
 
 def pc_to_pix(r, z):
