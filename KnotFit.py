@@ -20,7 +20,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 def main():
-    print("Let's begin...")
+    print("Let's begin...pix")
     indir = '/home/brian/Documents/JHU/lensing/whl0137'
     imfile = 'hlsp_relics_hst_wfc3ir-60mas_whl0137-08_f110w_drz.fits'
     imfile = os.path.join(indir,imfile)
@@ -52,18 +52,22 @@ def main():
     knotpos = (2950, 1976) # lower knot
     #knotpos = (2981, 2006) # upper knot
     x, y = knotpos
-    print(x)
-    print(y)
+    print(x, y)
+
+    knotmag = 1. / magnifinv[x,y]
 
     rmsfile = 'hlsp_relics_hst_wfc3ir-60mas_whl0137-08_f110w_rms.fits'
     rmsfile = os.path.join(indir, rmsfile)
     print('Generating ArgDict')
     argdict = initArgDict(rmsfile, imstamp, limits=(xlo,xhi,ylo,yhi), ax=ax, ay=ay,
-                          knotpos=knotpos, sourcegrid=(xss,yss), star=star)
+                          knotpos=knotpos, sourcegrid=(xss,yss), star=star, magnification=knotmag)
     
-    theta = np.array([.001, 450, x, y])
+    theta = np.array([.001, 1.5]) #, x, y]) # pixel radius
+    mcmcdict = '/home/brian/Documents/JHU/lensing/knotfit/chains'
+    mcmc_outfile = 'lowknot_pixradius_1k_4walk.h5'
+    mcmc_outfile = os.path.join(mcmcdict,mcmc_outfile)
     print('Beginning MCMC')
-    sampler = runMCMC(theta, argdict, nwalkers=8, niter=2500, outfile='lowknot_pos_2500_8walk.h5')
+    sampler = runMCMC(theta, argdict, nwalkers=4, niter=1000, outfile=mcmc_outfile)
     
     return sampler
 
@@ -161,11 +165,11 @@ def starGen(imdata, starLoc, extent=15):
 
 
 def initArgDict(rmsfile, imstamp, limits, ax, ay,
-                knotpos, sourcegrid, star, delta=5):
+                knotpos, sourcegrid, star, magnification=1., delta=5):
     xlo, xhi, ylo, yhi = limits
     x, y = knotpos
-    #xs = x - ax[y, x]
-    #ys = y - ay[y, x]
+    xs = x - ax[y, x]
+    ys = y - ay[y, x]
     xss, yss = sourcegrid
     rmsfo = fits.open(rmsfile)
     rms = rmsfo[0].data
@@ -175,18 +179,24 @@ def initArgDict(rmsfile, imstamp, limits, ax, ay,
     
     rms_cutout = rmscut[datay-delta:datay+delta, datax-delta:datax+delta]
     knotbounds = [datax-delta, datax+delta, datay-delta,datay+delta]
+    knot = imstamp[datay-delta:datay+delta, datax-delta:datax+delta]
+
+    sigma = poisson(rms_cutout, knot, t_expose=5123.501098)
+    sigma += rms_cutout
+
     # Include in args: xs, ys, xss, yss, star, data, sigma=RMS
     argdict = {
-        #"xs" : xs,
-        #"ys" : ys,
+        "xs" : xs,
+        "ys" : ys,
         "ax" : ax,
         "ay" : ay,
         "xss" : xss,
         "yss" : yss,
         "star" : star,
         "arcIm" : imstamp,
-        "sigma" : rms_cutout,
-        "knotbounds" : knotbounds
+        "sigma" : sigma,
+        "knotbounds" : knotbounds,
+        "magnification" : magnification
     }
     return argdict
 
@@ -214,11 +224,11 @@ def log_probability(theta, **kwargs):
     
 
 def log_prior(theta):
-    amp, reff, xs, ys = theta
-    a, b = xs - 5, xs + 5
-    c, d = ys - 5, ys + 5
+    amp, reff = theta #, xs, ys = theta
+    #a, b = xs - 5, xs + 5
+    #c, d = ys - 5, ys + 5
     # Don't forget to change reff limits when changing from pixel to physical constraints
-    if 0 < amp < 10 and 0 < reff < 1050 and a < xs < b and c < ys < d:
+    if 0 < amp < 10 and 0 < reff < 1500:# and a < xs < b and c < ys < d:
         return 0
     return -np.inf
     
@@ -252,9 +262,9 @@ def chisquared(theta, **kwargs):
 
 def convolved(theta, **kwargs): 
     #amp, reff = theta #BDW
-    amp, reff, xs, ys = preconv(theta, **kwargs)
+    amp, reff = preconv(theta, **kwargs) #, xs, ys
     #print(amp,reff, xs, ys)
-    #BDW#xs, ys = kwargs["xs"], kwargs["ys"]
+    xs, ys = kwargs["xs"], kwargs["ys"]
     xss, yss = kwargs["xss"], kwargs["yss"]
     star = kwargs["star"]
     sersic = Sersic2D(amplitude=amp, r_eff=reff, n=4, x_0=xs, y_0=ys)
@@ -268,16 +278,15 @@ def convolved(theta, **kwargs):
 
 def preconv(theta, **kwargs):
     #This needs to be fixed...
-    flux, rpc, xim, yim = theta
-    xim = int(round(xim))
-    yim = int(round(yim))
-    #print(xim, type(xim))
-    #print(yim, type(yim))
-    ay = kwargs["ay"]
-    ax = kwargs["ax"]
-    xs = xim - ax[yim, xim]
-    ys = yim - ay[yim, xim] 
-    rpix = pc_to_pix(rpc, 6.2)
+    flux, rpc = theta #, xim, yim = theta
+    #xim = int(round(xim))
+    #yim = int(round(yim))
+    #ay = kwargs["ay"]
+    #ax = kwargs["ax"]
+    #xs = xim - ax[yim, xim]
+    #ys = yim - ay[yim, xim] 
+    magnification = kwargs["magnification"]
+    rpix = pc_to_pix(rpc, 6.2, magnification)
     #dist = cosmo.angular_diameter_distance_z1z2(0 , 6.2).value * 10**6 #returns in pc
     #print(dist)
     #magnif = 300 #??
@@ -285,12 +294,22 @@ def preconv(theta, **kwargs):
     #print(coef)
     #amp = flux / (coef * rpc**2)
     amp = flux # stand-in until you fix this calculation...
-    return amp, rpix, xs, ys
+    return amp, rpix #, xs, ys
 
 
-def pc_to_pix(r, z):
+def poisson(rms, flux_eps, t_expose, gain=1.):
+    ix = [flux_eps<0]
+    flux_eps[ix] = 0. # remove zeros to avoid nans in sqrt
+    flux_photon = flux_eps / gain
+    Nphoton = flux_photon * t_expose
+    result = np.sqrt(Nphoton) / t_expose
+    return result 
+
+
+def pc_to_pix(r, z, magnification):
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     DA = cosmo.angular_diameter_distance_z1z2(0 , z).value * 10**6 #returns in pc
+    r = r * np.sqrt(magnification) #account for magnification
     theta = r / DA # radian
     theta = theta * (180 / np.pi) * 3600 # arcsec
     pixSize = 0.06 #HST WFC3 pixel size
@@ -298,12 +317,13 @@ def pc_to_pix(r, z):
     return rpix
 
 
-def pix_to_pc(rpix, z):
+def pix_to_pc(rpix, z, magnification):
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     DA = cosmo.angular_diameter_distance_z1z2(0 , z).value * 10**6 #returns in pc
     pixSize = 0.06 #HST WFC3 pixel size
     theta = rpix * pixSize #arcsec
     theta = theta / ((180. / np.pi) * 3600) #radian
     r = theta * DA #phys
-    return r
+    r_demag = r / np.sqrt(magnification) 
+    return r_demag
 
